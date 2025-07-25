@@ -2,66 +2,61 @@ pipeline {
   agent any
 
   environment {
-    AWS_REGION = 'us-east-1'
-    ECR_REGISTRY = '757370076744.dkr.ecr.us-east-1.amazonaws.com'
-    REPO_NAME = 'demo-app'
-    IMAGE_TAG = "v1.${BUILD_NUMBER}"
+    AWS_REGION = "us-east-1"
   }
 
   stages {
     stage('Checkout Code') {
       steps {
-        git branch: 'main', url: 'https://github.com/singammanisha65/ecs-demo-app'
+        git branch: 'main',
+            credentialsId: 'aws-credentials',
+            url: 'https://github.com/singammanisha65/ecs-demo-app.git'
       }
     }
 
     stage('Build Docker Image') {
       steps {
-        sh '''
-          echo "Building Docker image..."
-          docker build -t $REPO_NAME:$IMAGE_TAG .
-        '''
+        echo 'Building Docker image...'
+        sh 'docker build -t demo-app:v1.3 .'
       }
     }
 
     stage('Login to ECR') {
       steps {
-        sh '''
-          echo "Logging in to ECR..."
-          aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin $ECR_REGISTRY
-        '''
+        withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+          sh '''
+            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+            aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin 757370076744.dkr.ecr.us-east-1.amazonaws.com
+          '''
+        }
       }
     }
 
     stage('Push to ECR') {
       steps {
         sh '''
-          docker tag $REPO_NAME:$IMAGE_TAG $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG
+          docker tag demo-app:v1.3 757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:v1.3
+          docker push 757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:v1.3
         '''
       }
     }
 
     stage('Deploy to ECS') {
       steps {
-        sh '''
-          echo "Updating ECS service..."
-          aws ecs update-service \
-            --cluster dev-ecs-cluster \
-            --service dev-service \
-            --force-new-deployment
-        '''
-      }
-    }
-  }
+        withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+          sh '''
+            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
 
-  post {
-    success {
-      echo "✅ Deployment successful!"
-    }
-    failure {
-      echo "❌ Deployment failed."
+            aws ecs update-service \
+              --cluster dev-ecs-cluster \
+              --service dev-service \
+              --force-new-deployment \
+              --region $AWS_REGION
+          '''
+        }
+      }
     }
   }
 }
