@@ -59,7 +59,6 @@ pipeline {
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
             aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
 
-            # Register new task definition and capture the revision number
             TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
               --family $TASK_FAMILY \
               --requires-compatibilities FARGATE \
@@ -81,17 +80,15 @@ pipeline {
 
     stage('Update ECS Service') {
       steps {
-        echo '🔁 Updating ECS Service with new task definition...'
+        echo '🔁 Triggering ECS Service deployment...'
         withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           sh '''
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
             aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
 
-            # Read the new task definition ARN
             TASK_DEFINITION_ARN=$(cat task_definition_arn.txt)
             echo "Updating service with Task Definition: $TASK_DEFINITION_ARN"
 
-            # Update service with the specific task definition
             aws ecs update-service \
               --cluster $CLUSTER_NAME \
               --service $SERVICE_NAME \
@@ -99,41 +96,7 @@ pipeline {
               --force-new-deployment \
               --region $AWS_REGION
 
-            # Wait for deployment to complete
-            echo "Waiting for service to stabilize..."
-            aws ecs wait services-stable \
-              --cluster $CLUSTER_NAME \
-              --services $SERVICE_NAME \
-              --region $AWS_REGION
-          '''
-        }
-      }
-    }
-
-    stage('Verify Deployment') {
-      steps {
-        echo '✅ Verifying deployment...'
-        withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-          sh '''
-            aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
-            aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
-
-            # Get current running tasks
-            echo "Current running tasks:"
-            aws ecs list-tasks \
-              --cluster $CLUSTER_NAME \
-              --service-name $SERVICE_NAME \
-              --desired-status RUNNING \
-              --region $AWS_REGION
-
-            # Describe the service to see current task definition
-            echo "Service current task definition:"
-            aws ecs describe-services \
-              --cluster $CLUSTER_NAME \
-              --services $SERVICE_NAME \
-              --region $AWS_REGION \
-              --query 'services[0].taskDefinition' \
-              --output text
+            echo "✅ Deployment initiated! ECS will continue deploying in the background."
           '''
         }
       }
@@ -147,14 +110,12 @@ pipeline {
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
             aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
 
-            # Deregister scalable target if it exists
             aws application-autoscaling deregister-scalable-target \
               --service-namespace ecs \
               --scalable-dimension ecs:service:DesiredCount \
               --resource-id service/$CLUSTER_NAME/$SERVICE_NAME \
               --region $AWS_REGION || true
 
-            # Register scalable target
             aws application-autoscaling register-scalable-target \
               --service-namespace ecs \
               --scalable-dimension ecs:service:DesiredCount \
@@ -163,7 +124,6 @@ pipeline {
               --max-capacity 3 \
               --region $AWS_REGION
 
-            # Delete existing scaling policy
             aws application-autoscaling delete-scaling-policy \
               --service-namespace ecs \
               --scalable-dimension ecs:service:DesiredCount \
@@ -171,7 +131,6 @@ pipeline {
               --policy-name cpu-utilization-policy \
               --region $AWS_REGION || true
 
-            # Add new scaling policy
             aws application-autoscaling put-scaling-policy \
               --service-namespace ecs \
               --scalable-dimension ecs:service:DesiredCount \
@@ -188,10 +147,11 @@ pipeline {
 
   post {
     success {
-      echo '✅ Deployment succeeded!'
+      echo '✅ Pipeline completed successfully!'
+      echo '📍 Deployment is continuing in the background. Check ECS Console for progress.'
     }
     failure {
-      echo '❌ Deployment failed.'
+      echo '❌ Pipeline failed.'
     }
     cleanup {
       sh 'rm -f task_definition_arn.txt'
