@@ -1,34 +1,53 @@
 pipeline {
   agent any
 
-  triggers {
-    githubPush()  // Auto-trigger on staging branch push
-  }
-
+  // No automatic triggers - manual only for production
+  
   environment {
     AWS_REGION        = "us-east-1"
-    BUILD_TAG         = "staging-v${BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"  // Include git commit for uniqueness
+    BUILD_TAG         = "prod-v${BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
     ECR_URI           = "757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:${BUILD_TAG}"
-    LOG_GROUP         = "/ecs/staging-demo-app"
-    TASK_FAMILY       = "staging-task"
-    CLUSTER_NAME      = "staging-ecs-cluster"
-    SERVICE_NAME      = "staging-service"
-    EXECUTION_ROLE_ARN = "arn:aws:iam::757370076744:role/staging-ecsTaskExecutionRole-v2"
+    LOG_GROUP         = "/ecs/prod-demo-app"
+    TASK_FAMILY       = "prod-task"
+    CLUSTER_NAME      = "prod-ecs-cluster"
+    SERVICE_NAME      = "prod-service"
+    EXECUTION_ROLE_ARN = "arn:aws:iam::757370076744:role/prod-ecsTaskExecutionRole-v2"
   }
 
   stages {
-    stage('Staging Environment Check') {
+    stage('Production Approval') {
       steps {
-        echo '🔍 Deploying to STAGING environment...'
-        echo "Branch: ${env.GIT_BRANCH}"
-        echo "Build: ${BUILD_TAG}"
-        echo "Commit: ${env.GIT_COMMIT}"
+        script {
+          def deploymentApproval = input(
+            message: '🚨 Deploy to PRODUCTION? This action affects live users!',
+            ok: 'Deploy to Production',
+            parameters: [
+              choice(name: 'CONFIRM_DEPLOYMENT', choices: ['No', 'Yes'], description: 'Confirm production deployment')
+            ],
+            submitterParameter: 'APPROVER'
+          )
+          
+          if (deploymentApproval.CONFIRM_DEPLOYMENT != 'Yes') {
+            error('Production deployment cancelled by user')
+          }
+          
+          echo "✅ Production deployment approved by: ${APPROVER}"
+        }
+      }
+    }
+
+    stage('Pre-Production Validation') {
+      steps {
+        echo '🔍 Running pre-production checks...'
+        echo "Deploying from branch: ${env.GIT_BRANCH}"
+        echo "Build tag: ${BUILD_TAG}"
+        echo "Approved by: ${APPROVER}"
       }
     }
 
     stage('Checkout Code') {
       steps {
-        git branch: 'staging',
+        git branch: 'production',
             credentialsId: 'aws-credentials',
             url: 'https://github.com/singammanisha65/ecs-demo-app.git'
       }
@@ -36,11 +55,11 @@ pipeline {
 
     stage('Build Docker Image') {
       steps {
-        echo '📦 Building Docker image for staging...'
+        echo '📦 Building Docker image for production...'
         sh '''
           # Build with no cache to ensure fresh build
           docker build --no-cache -t demo-app:${BUILD_TAG} .
-          echo "✅ Built image: demo-app:${BUILD_TAG}"
+          echo "✅ Built production image: demo-app:${BUILD_TAG}"
         '''
       }
     }
@@ -60,60 +79,59 @@ pipeline {
 
     stage('Push to ECR') {
       steps {
-        echo '🚀 Pushing staging image to ECR...'
+        echo '🚀 Pushing production image to ECR...'
         sh '''
           docker tag demo-app:${BUILD_TAG} $ECR_URI
           docker push $ECR_URI
           echo "✅ Pushed: $ECR_URI"
           
-          # Also tag as latest for this environment
-          docker tag demo-app:${BUILD_TAG} 757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:staging-latest
-          docker push 757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:staging-latest
+          # Also tag as latest for production
+          docker tag demo-app:${BUILD_TAG} 757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:prod-latest
+          docker push 757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:prod-latest
         '''
       }
     }
 
     stage('Register New Task Definition') {
       steps {
-        echo '📄 Registering ECS Task Definition for staging...'
+        echo '📄 Registering ECS Task Definition for production...'
         withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           sh '''
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
             aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
 
-            echo "🔄 Registering new task definition with image: $ECR_URI"
+            echo "🔄 Registering production task definition with image: $ECR_URI"
 
             TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
               --family $TASK_FAMILY \
               --requires-compatibilities FARGATE \
               --network-mode awsvpc \
-              --cpu 256 \
-              --memory 512 \
+              --cpu 512 \
+              --memory 1024 \
               --execution-role-arn $EXECUTION_ROLE_ARN \
-              --container-definitions '[{"name":"app","image":"'$ECR_URI'","essential":true,"portMappings":[{"containerPort":80,"protocol":"tcp"}],"environment":[{"name":"DB_HOST","value":"staging-rds.cy9cqcygodlh.us-east-1.rds.amazonaws.com:3306"},{"name":"DB_USER","value":"admin"},{"name":"DB_PASS","value":"StagingPassword123!"}],"logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"'$LOG_GROUP'","awslogs-region":"'$AWS_REGION'","awslogs-stream-prefix":"ecs"}}}]' \
+              --container-definitions '[{"name":"app","image":"'$ECR_URI'","essential":true,"portMappings":[{"containerPort":80,"protocol":"tcp"}],"environment":[{"name":"DB_HOST","value":"prod-rds.cy9cqcygodlh.us-east-1.rds.amazonaws.com:3306"},{"name":"DB_USER","value":"admin"},{"name":"DB_PASS","value":"ProductionPassword123!"}],"logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"'$LOG_GROUP'","awslogs-region":"'$AWS_REGION'","awslogs-stream-prefix":"ecs"}}}]' \
               --region $AWS_REGION \
               --query 'taskDefinition.taskDefinitionArn' \
               --output text)
 
-            echo "✅ New Task Definition: $TASK_DEFINITION_ARN"
+            echo "✅ Production Task Definition: $TASK_DEFINITION_ARN"
             echo "$TASK_DEFINITION_ARN" > task_definition_arn.txt
           '''
         }
       }
     }
 
-    stage('Update ECS Service with Latest') {
+    stage('Update ECS Service') {
       steps {
-        echo '🔁 Forcing ECS service to use latest task definition...'
+        echo '🔁 Updating production ECS Service...'
         withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           sh '''
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
             aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
 
             TASK_DEFINITION_ARN=$(cat task_definition_arn.txt)
-            echo "🚀 Updating service with latest task definition: $TASK_DEFINITION_ARN"
+            echo "🚀 Updating production service with Task Definition: $TASK_DEFINITION_ARN"
 
-            # Update service with specific task definition
             aws ecs update-service \
               --cluster $CLUSTER_NAME \
               --service $SERVICE_NAME \
@@ -121,13 +139,12 @@ pipeline {
               --force-new-deployment \
               --region $AWS_REGION
 
-            echo "✅ Service update initiated with latest image!"
+            echo "✅ Production service update initiated!"
             
-            # Wait a bit and verify the update
+            # Wait and check status
             echo "⏳ Waiting 30 seconds for service to start updating..."
             sleep 30
             
-            # Check deployment status
             aws ecs describe-services \
               --cluster $CLUSTER_NAME \
               --services $SERVICE_NAME \
@@ -139,9 +156,9 @@ pipeline {
       }
     }
 
-    stage('Verify Latest Deployment') {
+    stage('Verify Production Deployment') {
       steps {
-        echo '✅ Verifying latest image is deployed...'
+        echo '✅ Verifying production deployment...'
         withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           sh '''
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
@@ -176,7 +193,7 @@ pipeline {
 
     stage('Apply Auto-Scaling Policy') {
       steps {
-        echo '📊 Applying Auto-scaling policy for staging...'
+        echo '📊 Applying Auto-scaling policy for production...'
         withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           sh '''
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
@@ -192,8 +209,8 @@ pipeline {
               --service-namespace ecs \
               --scalable-dimension ecs:service:DesiredCount \
               --resource-id service/$CLUSTER_NAME/$SERVICE_NAME \
-              --min-capacity 1 \
-              --max-capacity 3 \
+              --min-capacity 2 \
+              --max-capacity 5 \
               --region $AWS_REGION
 
             aws application-autoscaling delete-scaling-policy \
@@ -209,8 +226,33 @@ pipeline {
               --resource-id service/$CLUSTER_NAME/$SERVICE_NAME \
               --policy-name cpu-utilization-policy \
               --policy-type TargetTrackingScaling \
-              --target-tracking-scaling-policy-configuration '{"TargetValue": 50.0, "PredefinedMetricSpecification": {"PredefinedMetricType": "ECSServiceAverageCPUUtilization"}, "ScaleInCooldown": 60, "ScaleOutCooldown": 60}' \
+              --target-tracking-scaling-policy-configuration '{"TargetValue": 70.0, "PredefinedMetricSpecification": {"PredefinedMetricType": "ECSServiceAverageCPUUtilization"}, "ScaleInCooldown": 300, "ScaleOutCooldown": 300}' \
               --region $AWS_REGION
+          '''
+        }
+      }
+    }
+
+    stage('Post-Production Verification') {
+      steps {
+        echo '✅ Running post-deployment verification...'
+        withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+          sh '''
+            aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+            aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+            
+            echo "Waiting 30 seconds for service to stabilize..."
+            sleep 30
+            
+            # Get ALB DNS name for production
+            ALB_DNS=$(aws elbv2 describe-load-balancers \
+              --names prod-alb \
+              --region $AWS_REGION \
+              --query 'LoadBalancers[0].DNSName' \
+              --output text)
+              
+            echo "🌐 Production URL: http://$ALB_DNS/"
+            echo "Production deployment verification completed"
           '''
         }
       }
@@ -219,12 +261,14 @@ pipeline {
 
   post {
     success {
-      echo '✅ Staging deployment completed with latest code!'
+      echo '✅ Production deployment completed successfully!'
       echo "🏷️ Deployed image: ${ECR_URI}"
-      echo "🌐 Staging URL: Check ECS console for ALB DNS name"
+      echo "👤 Deployed by: ${APPROVER}"
+      echo "🌐 Production URL: http://prod-alb-xxxxxxxxx.us-east-1.elb.amazonaws.com/"
     }
     failure {
-      echo '❌ Staging deployment failed.'
+      echo '❌ Production deployment failed - immediate attention required!'
+      echo "👤 Attempted by: ${APPROVER}"
     }
     cleanup {
       sh 'rm -f task_definition_arn.txt'
