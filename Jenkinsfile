@@ -7,7 +7,7 @@ pipeline {
 
   environment {
     AWS_REGION        = "us-east-1"
-    BUILD_TAG         = "staging-v${BUILD_NUMBER}"
+    BUILD_TAG         = "staging-v${BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"  // Include git commit for uniqueness
     ECR_URI           = "757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:${BUILD_TAG}"
     LOG_GROUP         = "/ecs/staging-demo-app"
     TASK_FAMILY       = "staging-task"
@@ -22,6 +22,7 @@ pipeline {
         echo '🔍 Deploying to STAGING environment...'
         echo "Branch: ${env.GIT_BRANCH}"
         echo "Build: ${BUILD_TAG}"
+        echo "Commit: ${env.GIT_COMMIT}"
       }
     }
 
@@ -36,7 +37,11 @@ pipeline {
     stage('Build Docker Image') {
       steps {
         echo '📦 Building Docker image for staging...'
-        sh 'docker build -t demo-app:${BUILD_TAG} .'
+        sh '''
+          # Build with no cache to ensure fresh build
+          docker build --no-cache -t demo-app:${BUILD_TAG} .
+          echo "✅ Built image: demo-app:${BUILD_TAG}"
+        '''
       }
     }
 
@@ -59,6 +64,11 @@ pipeline {
         sh '''
           docker tag demo-app:${BUILD_TAG} $ECR_URI
           docker push $ECR_URI
+          echo "✅ Pushed: $ECR_URI"
+          
+          # Also tag as latest for this environment
+          docker tag demo-app:${BUILD_TAG} 757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:staging-latest
+          docker push 757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:staging-latest
         '''
       }
     }
@@ -70,6 +80,8 @@ pipeline {
           sh '''
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
             aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+
+            echo "🔄 Registering new task definition with image: $ECR_URI"
 
             TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
               --family $TASK_FAMILY \
@@ -83,24 +95,25 @@ pipeline {
               --query 'taskDefinition.taskDefinitionArn' \
               --output text)
 
-            echo "Staging Task Definition ARN: $TASK_DEFINITION_ARN"
+            echo "✅ New Task Definition: $TASK_DEFINITION_ARN"
             echo "$TASK_DEFINITION_ARN" > task_definition_arn.txt
           '''
         }
       }
     }
 
-    stage('Update ECS Service') {
+    stage('Update ECS Service with Latest') {
       steps {
-        echo '🔁 Updating staging ECS Service...'
+        echo '🔁 Forcing ECS service to use latest task definition...'
         withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           sh '''
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
             aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
 
             TASK_DEFINITION_ARN=$(cat task_definition_arn.txt)
-            echo "Updating staging service with Task Definition: $TASK_DEFINITION_ARN"
+            echo "🚀 Updating service with latest task definition: $TASK_DEFINITION_ARN"
 
+            # Update service with specific task definition
             aws ecs update-service \
               --cluster $CLUSTER_NAME \
               --service $SERVICE_NAME \
@@ -108,7 +121,54 @@ pipeline {
               --force-new-deployment \
               --region $AWS_REGION
 
-            echo "✅ Staging deployment initiated!"
+            echo "✅ Service update initiated with latest image!"
+            
+            # Wait a bit and verify the update
+            echo "⏳ Waiting 30 seconds for service to start updating..."
+            sleep 30
+            
+            # Check deployment status
+            aws ecs describe-services \
+              --cluster $CLUSTER_NAME \
+              --services $SERVICE_NAME \
+              --region $AWS_REGION \
+              --query 'services[0].deployments[0].{Status:status,TaskDefinition:taskDefinition,RunningCount:runningCount,PendingCount:pendingCount}' \
+              --output table
+          '''
+        }
+      }
+    }
+
+    stage('Verify Latest Deployment') {
+      steps {
+        echo '✅ Verifying latest image is deployed...'
+        withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+          sh '''
+            aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+            aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+
+            echo "🔍 Checking running tasks for latest image..."
+            
+            # Get running tasks
+            TASK_ARNS=$(aws ecs list-tasks \
+              --cluster $CLUSTER_NAME \
+              --service-name $SERVICE_NAME \
+              --desired-status RUNNING \
+              --region $AWS_REGION \
+              --query 'taskArns' \
+              --output text)
+
+            if [ ! -z "$TASK_ARNS" ]; then
+              echo "📋 Current running tasks:"
+              aws ecs describe-tasks \
+                --cluster $CLUSTER_NAME \
+                --tasks $TASK_ARNS \
+                --region $AWS_REGION \
+                --query 'tasks[*].{TaskArn:taskArn,TaskDefinition:taskDefinitionArn,LastStatus:lastStatus}' \
+                --output table
+            else
+              echo "⚠️ No running tasks found yet - deployment may still be in progress"
+            fi
           '''
         }
       }
@@ -159,8 +219,9 @@ pipeline {
 
   post {
     success {
-      echo '✅ Staging deployment completed successfully!'
-      echo "🌐 Staging URL: http://staging-alb-xxxxxxxxx.us-east-1.elb.amazonaws.com/"
+      echo '✅ Staging deployment completed with latest code!'
+      echo "🏷️ Deployed image: ${ECR_URI}"
+      echo "🌐 Staging URL: Check ECS console for ALB DNS name"
     }
     failure {
       echo '❌ Staging deployment failed.'
