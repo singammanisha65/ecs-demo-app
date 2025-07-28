@@ -1,8 +1,6 @@
 pipeline {
   agent any
 
-  // No automatic triggers - manual only for production
-  
   environment {
     AWS_REGION        = "us-east-1"
     BUILD_TAG         = "prod-v${BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
@@ -12,6 +10,7 @@ pipeline {
     CLUSTER_NAME      = "prod-ecs-cluster"
     SERVICE_NAME      = "prod-service"
     EXECUTION_ROLE_ARN = "arn:aws:iam::757370076744:role/prod-ecsTaskExecutionRole-v2"
+    APPROVER          = ""  // Initialize as environment variable
   }
 
   stages {
@@ -24,14 +23,16 @@ pipeline {
             parameters: [
               choice(name: 'CONFIRM_DEPLOYMENT', choices: ['No', 'Yes'], description: 'Confirm production deployment')
             ],
-            submitterParameter: 'APPROVER'
+            submitterParameter: 'DEPLOYMENT_APPROVER'
           )
           
           if (deploymentApproval.CONFIRM_DEPLOYMENT != 'Yes') {
             error('Production deployment cancelled by user')
           }
           
-          echo "✅ Production deployment approved by: ${APPROVER}"
+          // Set environment variable so it's accessible in post section
+          env.APPROVER = deploymentApproval.DEPLOYMENT_APPROVER
+          echo "✅ Production deployment approved by: ${env.APPROVER}"
         }
       }
     }
@@ -41,15 +42,7 @@ pipeline {
         echo '🔍 Running pre-production checks...'
         echo "Deploying from branch: ${env.GIT_BRANCH}"
         echo "Build tag: ${BUILD_TAG}"
-        echo "Approved by: ${APPROVER}"
-      }
-    }
-
-    stage('Checkout Code') {
-      steps {
-        git branch: 'production',
-            credentialsId: 'aws-credentials',
-            url: 'https://github.com/singammanisha65/ecs-demo-app.git'
+        echo "Approved by: ${env.APPROVER}"
       }
     }
 
@@ -263,12 +256,18 @@ pipeline {
     success {
       echo '✅ Production deployment completed successfully!'
       echo "🏷️ Deployed image: ${ECR_URI}"
-      echo "👤 Deployed by: ${APPROVER}"
-      echo "🌐 Production URL: http://prod-alb-xxxxxxxxx.us-east-1.elb.amazonaws.com/"
+      echo "👤 Deployed by: ${env.APPROVER}"
+      echo "🌐 Production URL: Check output above for ALB DNS"
     }
     failure {
       echo '❌ Production deployment failed - immediate attention required!'
-      echo "👤 Attempted by: ${APPROVER}"
+      script {
+        if (env.APPROVER) {
+          echo "👤 Attempted by: ${env.APPROVER}"
+        } else {
+          echo "👤 Attempted by: Unknown (approval may not have completed)"
+        }
+      }
     }
     cleanup {
       sh 'rm -f task_definition_arn.txt'
