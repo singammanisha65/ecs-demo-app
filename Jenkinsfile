@@ -2,15 +2,13 @@ pipeline {
   agent any
 
   environment {
-    AWS_REGION = "us-east-1"
-    IMAGE_NAME = "demo-app"
-    IMAGE_TAG  = "v1.4"
-    ECR_URI    = "757370076744.dkr.ecr.us-east-1.amazonaws.com/${IMAGE_NAME}:${IMAGE_TAG}"
-    TASK_FAMILY = "dev-task"
-    CLUSTER_NAME = "dev-ecs-cluster"
-    SERVICE_NAME = "dev-service"
+    AWS_REGION        = "us-east-1"
+    ECR_URI           = "757370076744.dkr.ecr.us-east-1.amazonaws.com/demo-app:v1.4"
+    LOG_GROUP         = "/ecs/demo-app"
+    TASK_FAMILY       = "dev-task"
+    CLUSTER_NAME      = "dev-ecs-cluster"
+    SERVICE_NAME      = "dev-service"
     EXECUTION_ROLE_ARN = "arn:aws:iam::757370076744:role/dev-ecsTaskExecutionRole-v2"
-    LOG_GROUP = "/ecs/demo-app"
   }
 
   stages {
@@ -24,13 +22,14 @@ pipeline {
 
     stage('Build Docker Image') {
       steps {
-        echo "📦 Building Docker image..."
-        sh 'docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .'
+        echo '📦 Building Docker image...'
+        sh 'docker build -t demo-app:v1.4 .'
       }
     }
 
     stage('Login to ECR') {
       steps {
+        echo '🔐 Logging into AWS ECR...'
         withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           sh '''
             aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
@@ -43,32 +42,33 @@ pipeline {
 
     stage('Push to ECR') {
       steps {
+        echo '🚀 Pushing image to ECR...'
         sh '''
-          docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_URI}
-          docker push ${ECR_URI}
+          docker tag demo-app:v1.4 $ECR_URI
+          docker push $ECR_URI
         '''
       }
     }
 
     stage('Register New Task Definition') {
       steps {
-        echo "📄 Registering new ECS task definition..."
+        echo '📄 Registering ECS Task Definition...'
         withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-          sh '''
+          sh """
             aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
             aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
 
             aws ecs register-task-definition \
-              --family ${TASK_FAMILY} \
+              --family $TASK_FAMILY \
               --requires-compatibilities FARGATE \
               --network-mode awsvpc \
               --cpu 256 \
               --memory 512 \
-              --execution-role-arn ${EXECUTION_ROLE_ARN} \
+              --execution-role-arn $EXECUTION_ROLE_ARN \
               --container-definitions '[
                 {
                   "name": "app",
-                  "image": "${ECR_URI}",
+                  "image": "$ECR_URI",
                   "essential": true,
                   "portMappings": [
                     { "containerPort": 80, "protocol": "tcp" }
@@ -81,33 +81,69 @@ pipeline {
                   "logConfiguration": {
                     "logDriver": "awslogs",
                     "options": {
-                      "awslogs-group": "${LOG_GROUP}",
-                      "awslogs-region": "${AWS_REGION}",
+                      "awslogs-group": "$LOG_GROUP",
+                      "awslogs-region": "$AWS_REGION",
                       "awslogs-stream-prefix": "ecs"
                     }
                   }
                 }
               ]' \
               --region $AWS_REGION
-          '''
+          """
         }
       }
     }
 
     stage('Update ECS Service') {
       steps {
-        echo "🚀 Deploying to ECS..."
+        echo '🔁 Updating ECS Service...'
         withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-          sh '''
+          sh """
             aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
             aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
 
             aws ecs update-service \
-              --cluster ${CLUSTER_NAME} \
-              --service ${SERVICE_NAME} \
+              --cluster $CLUSTER_NAME \
+              --service $SERVICE_NAME \
               --force-new-deployment \
               --region $AWS_REGION
-          '''
+          """
+        }
+      }
+    }
+
+    stage('Apply Auto-Scaling Policy') {
+      steps {
+        echo '📊 Applying Auto-scaling policy...'
+        withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+          sh """
+            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+
+            aws application-autoscaling register-scalable-target \
+              --service-namespace ecs \
+              --scalable-dimension ecs:service:DesiredCount \
+              --resource-id service/$CLUSTER_NAME/$SERVICE_NAME \
+              --min-capacity 1 \
+              --max-capacity 3 \
+              --region $AWS_REGION
+
+            aws application-autoscaling put-scaling-policy \
+              --service-namespace ecs \
+              --scalable-dimension ecs:service:DesiredCount \
+              --resource-id service/$CLUSTER_NAME/$SERVICE_NAME \
+              --policy-name cpu-utilization-policy \
+              --policy-type TargetTrackingScaling \
+              --target-tracking-scaling-policy-configuration '{
+                "TargetValue": 50.0,
+                "PredefinedMetricSpecification": {
+                  "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
+                },
+                "ScaleInCooldown": 60,
+                "ScaleOutCooldown": 60
+              }' \
+              --region $AWS_REGION
+          """
         }
       }
     }
@@ -115,10 +151,10 @@ pipeline {
 
   post {
     success {
-      echo "✅ Deployment to ECS complete!"
+      echo '✅ Deployment succeeded!'
     }
     failure {
-      echo "❌ Deployment failed."
+      echo '❌ Deployment failed.'
     }
   }
 }
