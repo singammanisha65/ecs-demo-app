@@ -99,13 +99,14 @@ pipeline {
             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
             aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
 
-            aws application-autoscaling delete-scaling-policy \
+            # Deregister scalable target if it exists (to clean state before re-registering)
+            aws application-autoscaling deregister-scalable-target \
               --service-namespace ecs \
               --scalable-dimension ecs:service:DesiredCount \
               --resource-id service/$CLUSTER_NAME/$SERVICE_NAME \
-              --policy-name cpu-utilization-policy \
               --region $AWS_REGION || true
 
+            # Register scalable target
             aws application-autoscaling register-scalable-target \
               --service-namespace ecs \
               --scalable-dimension ecs:service:DesiredCount \
@@ -114,6 +115,15 @@ pipeline {
               --max-capacity 3 \
               --region $AWS_REGION
 
+            # Delete existing scaling policy (if it exists)
+            aws application-autoscaling delete-scaling-policy \
+              --service-namespace ecs \
+              --scalable-dimension ecs:service:DesiredCount \
+              --resource-id service/$CLUSTER_NAME/$SERVICE_NAME \
+              --policy-name cpu-utilization-policy \
+              --region $AWS_REGION || true
+
+            # Add new scaling policy
             aws application-autoscaling put-scaling-policy \
               --service-namespace ecs \
               --scalable-dimension ecs:service:DesiredCount \
