@@ -46,28 +46,33 @@ pipeline {
 
     stage('Deploy to ECS') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           sh '''
             aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
             aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
 
-            # Register new task definition revision with updated image
-            FAMILY=$(aws ecs describe-task-definition --task-definition dev-task --query 'taskDefinition.family' --output text)
+            # Get current task definition and update image tag
+            TASK_DEF_JSON=$(aws ecs describe-task-definition --task-definition dev-task --region $AWS_REGION)
 
-            CONTAINER_DEF=$(aws ecs describe-task-definition --task-definition dev-task \
-              --query 'taskDefinition.containerDefinitions' --output json | \
-              jq '.[0].image="'${ECR_REPO}:${IMAGE_TAG}'" | [.]')
+            FAMILY=$(echo $TASK_DEF_JSON | jq -r '.taskDefinition.family')
+            EXEC_ROLE=$(echo $TASK_DEF_JSON | jq -r '.taskDefinition.executionRoleArn')
+            NET_MODE=$(echo $TASK_DEF_JSON | jq -r '.taskDefinition.networkMode')
+            COMPAT=$(echo $TASK_DEF_JSON | jq -r '.taskDefinition.requiresCompatibilities[0]')
+            CPU=$(echo $TASK_DEF_JSON | jq -r '.taskDefinition.cpu')
+            MEMORY=$(echo $TASK_DEF_JSON | jq -r '.taskDefinition.memory')
+
+            CONTAINER_DEF=$(echo $TASK_DEF_JSON | jq --arg IMAGE "${ECR_REPO}:${IMAGE_TAG}" '.taskDefinition.containerDefinitions | map(.image = $IMAGE)')
 
             aws ecs register-task-definition \
               --family $FAMILY \
-              --network-mode awsvpc \
-              --requires-compatibilities FARGATE \
-              --cpu "256" \
-              --memory "512" \
-              --execution-role-arn arn:aws:iam::757370076744:role/dev-ecsTaskExecutionRole-v2 \
+              --execution-role-arn $EXEC_ROLE \
+              --network-mode $NET_MODE \
+              --requires-compatibilities $COMPAT \
+              --cpu $CPU \
+              --memory $MEMORY \
               --container-definitions "$CONTAINER_DEF"
 
-            echo "Deploying new version to ECS..."
+            echo "Triggering ECS deployment..."
             aws ecs update-service \
               --cluster dev-ecs-cluster \
               --service dev-service \
@@ -75,6 +80,7 @@ pipeline {
               --region $AWS_REGION
           '''
         }
+
       }
     }
   }
