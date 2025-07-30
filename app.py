@@ -4,7 +4,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "<h1>Hello from your ECS app! 🚀</h1> after change in jenkins and it is working"
+    return "<h1>Hello from your ECS app! 🚀</h1> after change in jenkins and it is getting deployed"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=80)
