@@ -16,7 +16,7 @@ pipeline {
     EXECUTION_ROLE_ARN = "arn:aws:iam::757370076744:role/staging-ecsTaskExecutionRole-v2"
   }
 
-  //stages {
+  stages {
     stage('Staging Environment Check') {
       steps {
         echo '🔍 Deploying to STAGING environment...'
@@ -24,7 +24,7 @@ pipeline {
         echo "Build: ${BUILD_TAG}"
         echo "Commit: ${env.GIT_COMMIT}"
       }
-    }//
+    }
 
     stage('Checkout Code') {
       steps {
@@ -212,7 +212,7 @@ pipeline {
               --target-tracking-scaling-policy-configuration '{"TargetValue": 50.0, "PredefinedMetricSpecification": {"PredefinedMetricType": "ECSServiceAverageCPUUtilization"}, "ScaleInCooldown": 60, "ScaleOutCooldown": 60}' \
               --region $AWS_REGION
           '''
-        //}//
+        }
       }
     }
   }
