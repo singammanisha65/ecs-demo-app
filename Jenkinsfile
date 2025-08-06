@@ -16,7 +16,7 @@ pipeline {
     stage('Checkout Code') {
       steps {
         git branch: 'main',
-            credentialsId: 'github-credentials',
+            credentialsId: 'aws-credentials',
             url: 'https://github.com/singammanisha65/ecs-demo-app.git'
       }
     }
